@@ -22,29 +22,31 @@ bool streamMode = false;
 unsigned long lastStreamMs = 0;
 const unsigned long STREAM_INTERVAL_MS = 500;
 
-// Pending one-shot pressure read (deferred to loop to avoid I2C races)
 volatile bool pendingPressureRead = false;
 
 // ── Depth-profile mission state machine ─────────────────────────────────────
-enum ProfileState { PROFILE_IDLE, PROFILE_DESCEND, PROFILE_HOLD,
-                    PROFILE_ASCEND, PROFILE_COMPLETE };
+enum ProfileState { 
+  PROFILE_IDLE, 
+  PROFILE_DESCEND1, 
+  PROFILE_HOLD1, 
+  PROFILE_MOVE2, 
+  PROFILE_HOLD2, 
+  PROFILE_ASCEND 
+};
 
 ProfileState  profileState      = PROFILE_IDLE;
-float         targetDepthFt     = 0.0;
-unsigned long holdTimeMs        = 0;
+float         targetDepth1_m    = 0.0;
+float         targetDepth2_m    = 0.0;
+unsigned long holdTime1_ms      = 0;
+unsigned long holdTime2_ms      = 0;
+
 unsigned long phaseStartMs      = 0;
+unsigned long profileStartMs    = 0;
+unsigned long lastDataSendMs    = 0;
 
-float         profMaxPressure   = 0.0;
-float         profAvgPressure   = 0.0;
-float         profMaxDepthFt    = 0.0;
-float         profPressureSum   = 0.0;
-int           profSampleCount   = 0;
-
-const unsigned long MAX_DESCEND_MS = 60000;   // 60 s safety
-const unsigned long MAX_ASCEND_MS  = 60000;
-const float SURFACE_DEPTH_FT       = 0.5;     // depth considered "back at surface"
-const float DEPTH_TOLERANCE_FT     = 0.3;
-const int   PROFILE_MOTOR_SPEED    = 200;
+const unsigned long MAX_PHASE_MS  = 60000;   // 60 s safety per phase
+const float SURFACE_DEPTH_M       = 0.1;     // 10cm considered surface
+const int   PROFILE_MOTOR_SPEED   = 200;
 
 // ── Motor helpers ────────────────────────────────────────────────────────────
 void motorForward(int speed) {
@@ -73,91 +75,122 @@ void sendAck(const String& cmd) {
 
 void sendSensorData() {
   sensor.read();
-  float depthFeet = sensor.depth() * 3.28084;
+  float depthM = sensor.depth();
   String msg = "SENSOR:";
   msg += String(sensor.pressure(), 2); msg += ":";
-  msg += String(depthFeet, 2);         msg += ":";
+  msg += String(depthM, 2);            msg += ":";
   msg += currentMotorState;
   sendMsg(msg);
 }
 
 // ── Profile mission ──────────────────────────────────────────────────────────
-void startProfile(float depthFt, unsigned long holdSec) {
+void startProfile(float d1, unsigned long t1, float d2, unsigned long t2) {
   if (profileState != PROFILE_IDLE) { sendMsg("PROFILE_ERR:busy"); return; }
-  if (depthFt <= 0 || depthFt > 100) { sendMsg("PROFILE_ERR:bad_depth"); return; }
+  if (d1 <= 0 || d1 > 30 || d2 <= 0 || d2 > 30) { sendMsg("PROFILE_ERR:bad_depth"); return; }
 
-  targetDepthFt    = depthFt;
-  holdTimeMs       = holdSec * 1000UL;
-  profMaxPressure  = 0.0;
-  profMaxDepthFt   = 0.0;
-  profPressureSum  = 0.0;
-  profSampleCount  = 0;
-  profAvgPressure  = 0.0;
+  targetDepth1_m = d1;
+  targetDepth2_m = d2;
+  holdTime1_ms   = t1 * 1000UL;
+  holdTime2_ms   = t2 * 1000UL;
 
-  profileState = PROFILE_DESCEND;
+  profileStartMs = millis();
+  lastDataSendMs = millis();
+  
+  profileState = PROFILE_DESCEND1;
   phaseStartMs = millis();
   motorForward(PROFILE_MOTOR_SPEED);
 
-  Serial.printf("PROFILE START: target=%.2fft hold=%lus\n", depthFt, holdSec);
-  sendMsg("PROFILE_START:" + String(depthFt, 2) + ":" + String(holdSec) + "s");
+  sendMsg("PROFILE_START");
 }
 
 void updateProfile() {
   sensor.read();
-  float depthFeet = sensor.depth() * 3.28084;
-  float pressure  = sensor.pressure();
+  float depthM = sensor.depth();
+  float pressure = sensor.pressure();
   unsigned long now = millis();
+  unsigned long elapsed = now - profileStartMs;
+
+  // Stream mapping data continuously
+  if (now - lastDataSendMs >= 200) {
+    lastDataSendMs = now;
+    String dataMsg = "PROFILE_DATA:";
+    dataMsg += String(elapsed);   dataMsg += ":";
+    dataMsg += String(depthM, 2); dataMsg += ":";
+    dataMsg += String(pressure, 2);
+    sendMsg(dataMsg);
+  }
 
   switch (profileState) {
-    case PROFILE_DESCEND: {
-      if (depthFeet > profMaxDepthFt)  profMaxDepthFt  = depthFeet;
-      if (pressure  > profMaxPressure) profMaxPressure = pressure;
-
-      if (depthFeet >= targetDepthFt) {
+    case PROFILE_DESCEND1:
+      if (depthM >= targetDepth1_m) {
         motorStop();
-        profileState  = PROFILE_HOLD;
-        phaseStartMs  = now;
-        sendMsg("PROFILE_HOLD:reached " + String(depthFeet, 2) + "ft");
-      } else if (now - phaseStartMs > MAX_DESCEND_MS) {
+        profileState = PROFILE_HOLD1;
+        phaseStartMs = now;
+        sendMsg("PROFILE_HOLD1");
+      } else if (now - phaseStartMs > MAX_PHASE_MS) {
         motorStop();
-        sendMsg("PROFILE_WARN:descend_timeout at " + String(depthFeet, 2) + "ft");
-        profileState  = PROFILE_HOLD;
-        phaseStartMs  = now;
+        profileState = PROFILE_HOLD1;
+        phaseStartMs = now;
+        sendMsg("PROFILE_WARN:descend1_timeout");
       }
       break;
-    }
-    case PROFILE_HOLD: {
-      profPressureSum += pressure;
-      profSampleCount++;
-      if (pressure > profMaxPressure) profMaxPressure = pressure;
-
-      if (now - phaseStartMs >= holdTimeMs) {
-        if (profSampleCount > 0)
-          profAvgPressure = profPressureSum / profSampleCount;
+      
+    case PROFILE_HOLD1:
+      if (now - phaseStartMs >= holdTime1_ms) {
+        if (targetDepth2_m > targetDepth1_m) motorForward(PROFILE_MOTOR_SPEED);
+        else motorReverse(PROFILE_MOTOR_SPEED);
+        
+        profileState = PROFILE_MOVE2;
+        phaseStartMs = now;
+        sendMsg("PROFILE_MOVE2");
+      }
+      break;
+      
+    case PROFILE_MOVE2:
+      if (targetDepth2_m > targetDepth1_m) { 
+        if (depthM >= targetDepth2_m) {
+          motorStop();
+          profileState = PROFILE_HOLD2;
+          phaseStartMs = now;
+          sendMsg("PROFILE_HOLD2");
+        }
+      } else { 
+        if (depthM <= targetDepth2_m) {
+          motorStop();
+          profileState = PROFILE_HOLD2;
+          phaseStartMs = now;
+          sendMsg("PROFILE_HOLD2");
+        }
+      }
+      if (now - phaseStartMs > MAX_PHASE_MS) {
+        motorStop();
+        profileState = PROFILE_HOLD2;
+        phaseStartMs = now;
+        sendMsg("PROFILE_WARN:move2_timeout");
+      }
+      break;
+      
+    case PROFILE_HOLD2:
+      if (now - phaseStartMs >= holdTime2_ms) {
         motorReverse(PROFILE_MOTOR_SPEED);
-        profileState  = PROFILE_ASCEND;
-        phaseStartMs  = now;
-        sendMsg("PROFILE_ASCEND:hold_complete");
+        profileState = PROFILE_ASCEND;
+        phaseStartMs = now;
+        sendMsg("PROFILE_ASCEND");
       }
       break;
-    }
-    case PROFILE_ASCEND: {
-      if (depthFeet <= SURFACE_DEPTH_FT) {
+      
+    case PROFILE_ASCEND:
+      if (depthM <= SURFACE_DEPTH_M) {
         motorStop();
-        String result = "PROFILE_RESULT:";
-        result += String(profAvgPressure, 2); result += ":";
-        result += String(profMaxPressure, 2); result += ":";
-        result += String(profMaxDepthFt, 2);
-        sendMsg(result);
-        Serial.println(result);
         profileState = PROFILE_IDLE;
-      } else if (now - phaseStartMs > MAX_ASCEND_MS) {
+        sendMsg("PROFILE_COMPLETE");
+      } else if (now - phaseStartMs > MAX_PHASE_MS) {
         motorStop();
+        profileState = PROFILE_IDLE;
         sendMsg("PROFILE_ERR:ascend_timeout");
-        profileState = PROFILE_IDLE;
       }
       break;
-    }
+      
     default: break;
   }
 }
@@ -176,26 +209,40 @@ void OnRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
   cmd.trim();
   Serial.print("CMD received: "); Serial.println(cmd);
 
-  // PROFILE:<depth_ft>:<hold_sec>
+  // Commands allowed while running a profile
+  if (cmd == "STOP")           { sendAck(cmd); abortProfile(); motorStop(); return; }
+  if (cmd == "PROFILE_ABORT")  { sendAck(cmd); abortProfile(); return; }
+  if (cmd == "PING")           { sendAck(cmd); return; }
+
+  // If busy, reject other commands
+  if (profileState != PROFILE_IDLE) {
+    sendAck("BUSY");
+    return;
+  }
+
+  // PROFILE:<d1>:<t1>:<d2>:<t2>
   if (cmd.startsWith("PROFILE:")) {
     sendAck(cmd);
     String params = cmd.substring(8);
-    int sep = params.indexOf(':');
-    if (sep < 0) { sendMsg("PROFILE_ERR:bad_format"); return; }
-    float d = params.substring(0, sep).toFloat();
-    unsigned long t = (unsigned long)params.substring(sep + 1).toInt();
-    startProfile(d, t);
+    int s1 = params.indexOf(':');
+    int s2 = params.indexOf(':', s1+1);
+    int s3 = params.indexOf(':', s2+1);
+    if (s1 < 0 || s2 < 0 || s3 < 0) { sendMsg("PROFILE_ERR:bad_format"); return; }
+    
+    float d1 = params.substring(0, s1).toFloat();
+    unsigned long t1 = (unsigned long)params.substring(s1+1, s2).toInt();
+    float d2 = params.substring(s2+1, s3).toFloat();
+    unsigned long t2 = (unsigned long)params.substring(s3+1).toInt();
+    
+    startProfile(d1, t1, d2, t2);
     return;
   }
-  if (cmd == "PROFILE_ABORT") { sendAck(cmd); abortProfile(); return; }
 
-  if (cmd == "STOP")     { sendAck(cmd); abortProfile(); motorStop();     return; }
-  if (cmd == "FORWARD")  { sendAck(cmd); motorForward(200);               return; }
-  if (cmd == "REVERSE")  { sendAck(cmd); motorReverse(200);               return; }
-
-  if (cmd == "GET_PRESSURE") { sendAck(cmd); pendingPressureRead = true;  return; }
-  if (cmd == "STREAM_ON")    { sendAck(cmd); streamMode = true;           return; }
-  if (cmd == "STREAM_OFF")   { sendAck(cmd); streamMode = false;          return; }
+  if (cmd == "FORWARD")      { sendAck(cmd); motorForward(200);               return; }
+  if (cmd == "REVERSE")      { sendAck(cmd); motorReverse(200);               return; }
+  if (cmd == "GET_PRESSURE") { sendAck(cmd); pendingPressureRead = true;      return; }
+  if (cmd == "STREAM_ON")    { sendAck(cmd); streamMode = true;               return; }
+  if (cmd == "STREAM_OFF")   { sendAck(cmd); streamMode = false;              return; }
 
   sendAck("UNKNOWN:" + cmd);
 }
@@ -224,12 +271,10 @@ void setup() {
   if (esp_now_add_peer(&peerInfo) != ESP_OK) { Serial.println("Failed to add topside peer"); while (1) delay(1000); }
 
   Serial.println("ROV device ready");
-  Serial.print("My MAC: "); Serial.println(WiFi.macAddress());
   sendMsg("FLOAT_READY");
 }
 
 void loop() {
-  // Deferred one-shot pressure read (safe I2C context)
   if (pendingPressureRead) {
     pendingPressureRead = false;
     sendSensorData();
@@ -237,7 +282,7 @@ void loop() {
 
   if (profileState != PROFILE_IDLE) {
     updateProfile();
-    delay(100);
+    delay(50); // Faster loop during mission for smooth data mapping
     return;
   }
 

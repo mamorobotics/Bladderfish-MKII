@@ -7,7 +7,6 @@ uint8_t deviceMAC[] = {0x70, 0x4B, 0xCA, 0x26, 0x81, 0x40};
 unsigned long packetsReceived = 0;
 unsigned long acksReceived    = 0;
 
-// ── Send any command (forwarded to the float) ──────────────────────────────
 void sendCommand(String cmd) {
   cmd.trim();
   if (cmd.length() == 0) return;
@@ -20,7 +19,6 @@ void sendCommand(String cmd) {
   }
 }
 
-// ── Receive data from float ─────────────────────────────────────────────────
 void OnRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
   packetsReceived++;
   String msg = String((char*)data);
@@ -62,7 +60,6 @@ void setup() {
   if (esp_now_add_peer(&peerInfo) != ESP_OK) { Serial.println("Failed to add float peer"); while (1) delay(1000); }
 
   Serial.println("Topside controller ready");
-  Serial.print("My MAC: "); Serial.println(WiFi.macAddress());
 }
 
 void loop() {
