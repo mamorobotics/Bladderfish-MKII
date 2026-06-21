@@ -1,0 +1,24 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-06-21T00:00:00",
+  "calibration_status": "uncalibrated",
+  "motor": {
+    "descent_pwm": 180,
+    "ascent_pwm": 185,
+    "fine_control_pwm": 75,
+    "rapid_descent_pwm": 240,
+    "descent_rate_ms": 0.5,
+    "ascent_rate_ms": 0.5
+  },
+  "buoyancy": {
+    "neutral_drift_ms": 0.0,
+    "drift_acceptable": false,
+    "notes": ""
+  },
+  "test_results": {
+    "descent_rates": {},
+    "ascent_rates": {},
+    "test_duration_s": 0,
+    "total_data_points": 0
+  }
+}

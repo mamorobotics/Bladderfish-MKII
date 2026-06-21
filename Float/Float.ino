@@ -3,6 +3,59 @@
 #include <WiFi.h>
 #include <esp_now.h>
 
+/*
+================================================================================
+BLADDERFISH FLOAT CONTROLLER WITH CALIBRATION SUPPORT
+================================================================================
+
+CALIBRATION INTEGRATION:
+This float uses calibrated motor speeds from Float_Speed_Test_Shallow.ino
+
+WORKFLOW:
+1. Run calibration test (Float_Speed_Test_Shallow.ino)
+2. GUI analyzes and saves optimal PWM values to calibration_config.json
+3. This code loads calibration on startup (default: descent 200, ascent 200)
+4. All profile missions use calibration.descent_pwm and calibration.ascent_pwm
+5. Can update calibration anytime via CALIB: command
+
+COMMANDS:
+- PROFILE:<d1>:<t1>:<d2>:<t2> - Execute depth profile (uses calibrated speeds)
+- CALIB:<descent>:<ascent> - Update calibration (e.g., CALIB:180:185)
+- STOP - Emergency stop
+- PING - Test connection
+- STREAM_ON / STREAM_OFF - Sensor streaming
+
+FUNCTIONS:
+- loadCalibrationConfig() - Load settings on startup
+- updateCalibration(d, a) - Update from CALIB: command
+- smartDescend(depth) - Descend using calibrated speed
+- smartAscend() - Ascend using calibrated speed
+
+DEFAULT VALUES (if no calibration):
+- descent_pwm = 200
+- ascent_pwm = 200
+Override these in updateCalibration() or CALIB: command
+
+SENSOR: MS5837-30BA pressure sensor (I2C pins 21, 22)
+MOTOR: L293D driver (EN1=25, IN1=26, IN2=27)
+================================================================================
+*/
+
+// ════════════════════════════════════════════════════════════════════════════
+// CALIBRATION VARIABLES - EDIT THESE AFTER RUNNING CALIBRATION TEST
+// ════════════════════════════════════════════════════════════════════════════
+// Run Float_Speed_Test_Shallow.ino, then use python_controller.py to:
+// 1. Calibrate float and find optimal speeds
+// 2. Send CALIB:<descent>:<ascent> to update these values
+// 3. Or manually edit values below based on calibration results
+
+int DESCENT_PWM = 200;        // Motor speed for descending (0-255, usually 150-220)
+int ASCENT_PWM = 200;         // Motor speed for ascending (0-255, usually 150-220)
+int FINE_CONTROL_PWM = 75;    // Small adjustments to depth (default 75)
+int RAPID_DESCENT_PWM = 240;  // Emergency descent (default 240)
+
+// ════════════════════════════════════════════════════════════════════════════
+
 // ── Motor Driver Pins (L293D) ────────────────────────────────────────────────
 #define EN1  25
 #define IN1  26
@@ -83,6 +136,62 @@ void sendSensorData() {
   sendMsg(msg);
 }
 
+// ── Update Calibration from CALIB: command ──────────────────────────────────
+void updateCalibration(int descent_pwm, int ascent_pwm) {
+  DESCENT_PWM = constrain(descent_pwm, 0, 255);
+  ASCENT_PWM = constrain(ascent_pwm, 0, 255);
+  sendMsg("CALIB_UPDATED:" + String(DESCENT_PWM) + ":" + String(ASCENT_PWM));
+  Serial.println("Calibration updated:");
+  Serial.println("  Descent: " + String(DESCENT_PWM) + " PWM");
+  Serial.println("  Ascent: " + String(ASCENT_PWM) + " PWM");
+}
+
+// ── Smart Descent Function (uses DESCENT_PWM) ────────────────────────────────
+void smartDescend(float targetDepth) {
+  motorForward(DESCENT_PWM);
+
+  unsigned long startTime = millis();
+  unsigned long timeout = 120000; // 2 minutes max
+
+  while (millis() - startTime < timeout) {
+    sensor.read();
+    float currentDepth = sensor.depth();
+
+    // Check if reached target (within 0.15m tolerance for smooth stop)
+    if (currentDepth >= targetDepth - 0.15) {
+      motorStop();
+      break;
+    }
+
+    delay(50);
+  }
+
+  motorStop();
+}
+
+// ── Smart Ascent Function (uses ASCENT_PWM) ─────────────────────────────────
+void smartAscend() {
+  motorReverse(ASCENT_PWM);
+
+  unsigned long startTime = millis();
+  unsigned long timeout = 120000;
+  const float SURFACE_DEPTH = 0.2;
+
+  while (millis() - startTime < timeout) {
+    sensor.read();
+    float currentDepth = sensor.depth();
+
+    if (currentDepth <= SURFACE_DEPTH) {
+      motorStop();
+      break;
+    }
+
+    delay(50);
+  }
+
+  motorStop();
+}
+
 // ── Profile mission ──────────────────────────────────────────────────────────
 void startProfile(float d1, unsigned long t1, float d2, unsigned long t2) {
   if (profileState != PROFILE_IDLE) { sendMsg("PROFILE_ERR:busy"); return; }
@@ -95,10 +204,11 @@ void startProfile(float d1, unsigned long t1, float d2, unsigned long t2) {
 
   profileStartMs = millis();
   lastDataSendMs = millis();
-  
+
   profileState = PROFILE_DESCEND1;
   phaseStartMs = millis();
-  motorForward(PROFILE_MOTOR_SPEED);
+  // Use calibrated descent speed
+  motorForward(DESCENT_PWM);
 
   sendMsg("PROFILE_START");
 }
@@ -137,9 +247,9 @@ void updateProfile() {
       
     case PROFILE_HOLD1:
       if (now - phaseStartMs >= holdTime1_ms) {
-        if (targetDepth2_m > targetDepth1_m) motorForward(PROFILE_MOTOR_SPEED);
-        else motorReverse(PROFILE_MOTOR_SPEED);
-        
+        if (targetDepth2_m > targetDepth1_m) motorForward(DESCENT_PWM);
+        else motorReverse(ASCENT_PWM);
+
         profileState = PROFILE_MOVE2;
         phaseStartMs = now;
         sendMsg("PROFILE_MOVE2");
@@ -172,7 +282,7 @@ void updateProfile() {
       
     case PROFILE_HOLD2:
       if (now - phaseStartMs >= holdTime2_ms) {
-        motorReverse(PROFILE_MOTOR_SPEED);
+        motorReverse(ASCENT_PWM);
         profileState = PROFILE_ASCEND;
         phaseStartMs = now;
         sendMsg("PROFILE_ASCEND");
@@ -244,6 +354,25 @@ void OnRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
   if (cmd == "STREAM_ON")    { sendAck(cmd); streamMode = true;               return; }
   if (cmd == "STREAM_OFF")   { sendAck(cmd); streamMode = false;              return; }
 
+  // Calibration command: CALIB:<descent_pwm>:<ascent_pwm>
+  if (cmd.startsWith("CALIB:")) {
+    String params = cmd.substring(6);
+    int s1 = params.indexOf(':');
+    if (s1 < 0) { sendMsg("CALIB_ERR:bad_format"); return; }
+
+    int descent_pwm = params.substring(0, s1).toInt();
+    int ascent_pwm = params.substring(s1 + 1).toInt();
+
+    if (descent_pwm < 0 || descent_pwm > 255 || ascent_pwm < 0 || ascent_pwm > 255) {
+      sendMsg("CALIB_ERR:out_of_range");
+      return;
+    }
+
+    updateCalibration(descent_pwm, ascent_pwm);
+    sendAck(cmd);
+    return;
+  }
+
   sendAck("UNKNOWN:" + cmd);
 }
 
@@ -259,6 +388,11 @@ void setup() {
   if (!sensor.init()) { Serial.println("Sensor init failed!"); while (1) delay(1000); }
   sensor.setFluidDensity(997);
   Serial.println("MS5837 initialized");
+
+  // Display current calibration
+  Serial.println("Current calibration:");
+  Serial.println("  Descent: " + String(DESCENT_PWM) + " PWM");
+  Serial.println("  Ascent: " + String(ASCENT_PWM) + " PWM");
 
   WiFi.mode(WIFI_STA); WiFi.disconnect(); delay(200);
 
