@@ -118,6 +118,31 @@ class FloatControlGUI:
         chk.pack(side="left")
         self._action_widgets.append(chk)
 
+        nb_f = ttk.LabelFrame(left, text="Neutral Buoyancy Calibration")
+        nb_f.pack(fill="x", pady=(0, 6))
+        nb_row1 = ttk.Frame(nb_f)
+        nb_row1.pack(pady=8, padx=8, fill="x")
+
+        ttk.Label(nb_row1, text="NB Pump Time (ms):").pack(side="left", padx=(0, 4))
+        self.nb_pump_var = tk.StringVar(value="2000")
+        ttk.Entry(nb_row1, textvariable=self.nb_pump_var, width=7).pack(side="left", padx=(0, 12))
+
+        b = ttk.Button(nb_row1, text="Set Neutral Buoyancy",
+                       command=self.fill_neutral_buoyancy)
+        b.pack(side="left")
+        self._action_widgets.append(b)
+
+        nb_row2 = ttk.Frame(nb_f)
+        nb_row2.pack(pady=(0, 8), padx=8, fill="x")
+
+        ttk.Label(nb_row2, text="Descent Offset (m):").pack(side="left", padx=(0, 4))
+        self.descent_offset_var = tk.StringVar(value="0.3")
+        ttk.Entry(nb_row2, textvariable=self.descent_offset_var, width=6).pack(side="left", padx=(0, 12))
+
+        ttk.Label(nb_row2, text="Depth Tolerance (m):").pack(side="left", padx=(0, 4))
+        self.depth_tol_var = tk.StringVar(value="0.15")
+        ttk.Entry(nb_row2, textvariable=self.depth_tol_var, width=6).pack(side="left")
+
         custom_f = ttk.LabelFrame(left, text="Custom Command")
         custom_f.pack(fill="x")
         custom_row = ttk.Frame(custom_f)
@@ -160,6 +185,10 @@ class FloatControlGUI:
         p2_f = ttk.LabelFrame(right, text="Profile 2")
         p2_f.pack(fill="x")
         self.p2_d1, self.p2_t1, self.p2_d2, self.p2_t2 = self._build_profile_fields(p2_f, 2)
+
+        nb_note = ttk.Label(right, text="→ Profiles calibrate NB, descend intelligently, and return to surface",
+                            font=("Consolas", 8), foreground="gray")
+        nb_note.pack(pady=4)
 
         # ── Log ─────────────────────────────────────────────────────────────
         log_f = ttk.LabelFrame(self.root, text="Log")
@@ -359,6 +388,18 @@ class FloatControlGUI:
     def toggle_stream(self):
         self.send("STREAM_ON" if self.stream_var.get() else "STREAM_OFF")
 
+    def fill_neutral_buoyancy(self):
+        try:
+            nb_pump_ms = int(self.nb_pump_var.get())
+            if nb_pump_ms <= 0 or nb_pump_ms >= 60000:
+                messagebox.showerror("Invalid Input", "Pump time must be between 1 and 59999 milliseconds.")
+                return
+            cmd = f"SET_NB:{nb_pump_ms}"
+            self.send(cmd)
+            self.log_msg(f"[NB] Set neutral buoyancy pump duration: {nb_pump_ms} ms")
+        except ValueError:
+            messagebox.showerror("Invalid Input", "Pump time must be an integer (milliseconds).")
+
     def test_connection(self):
         if not self.serial_port or not self.serial_port.is_open:
             messagebox.showwarning("Not Connected", "Connect to the topside ESP32 first.")
@@ -383,11 +424,14 @@ class FloatControlGUI:
             t1 = int(t1)
             d2 = float(d2)
             t2 = int(t2)
+            nb_pump = int(self.nb_pump_var.get())
+            offset = float(self.descent_offset_var.get())
+            tol = float(self.depth_tol_var.get())
         except ValueError:
-            messagebox.showerror("Invalid Input", "Depths must be numbers, times must be integers.")
+            messagebox.showerror("Invalid Input", "Depths/parameters must be numbers, times must be integers.")
             return
 
-        cmd = f"PROFILE:{d1}:{t1}:{d2}:{t2}"
+        cmd = f"PROFILE:{d1}:{t1}:{d2}:{t2}:{nb_pump}:{offset}:{tol}"
         self.current_profile_id = profile_id
         self.send(cmd)
 
