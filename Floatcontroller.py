@@ -98,7 +98,7 @@ class FloatControlGUI:
         btn_row = ttk.Frame(motor_f)
         btn_row.pack(pady=8, padx=8)
 
-        for label, cmd in [("FORWARD", "FORWARD"), ("STOP", "STOP"), ("REVERSE", "REVERSE")]:
+        for label, cmd in [("OUT", "FORWARD"), ("STOP", "STOP"), ("IN", "REVERSE")]:
             b = ttk.Button(btn_row, text=label, width=9, command=lambda c=cmd: self.send(c))
             b.pack(side="left", padx=4)
             self._action_widgets.append(b)

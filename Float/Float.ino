@@ -53,7 +53,7 @@ float depth_tolerance_m                = 0.15;  // Acceptable depth range around
 
 const unsigned long MAX_PHASE_MS  = 60000;   // 60 s safety per phase
 const float SURFACE_DEPTH_M       = 0.1;     // 10cm considered surface
-const int   PROFILE_MOTOR_SPEED   = 200;
+const int   PROFILE_MOTOR_SPEED   = 255;
 
 // ── Motor helpers ────────────────────────────────────────────────────────────
 void motorForward(int speed) {
@@ -348,8 +348,8 @@ void OnRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
     return;
   }
 
-  if (cmd == "FORWARD")      { sendAck(cmd); motorForward(200);               return; }
-  if (cmd == "REVERSE")      { sendAck(cmd); motorReverse(200);               return; }
+  if (cmd == "FORWARD")      { sendAck(cmd); motorForward(255);               return; }
+  if (cmd == "REVERSE")      { sendAck(cmd); motorReverse(255);               return; }
   if (cmd == "GET_PRESSURE") { sendAck(cmd); pendingPressureRead = true;      return; }
   if (cmd == "STREAM_ON")    { sendAck(cmd); streamMode = true;               return; }
   if (cmd == "STREAM_OFF")   { sendAck(cmd); streamMode = false;              return; }
